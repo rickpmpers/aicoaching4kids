@@ -1,44 +1,55 @@
 /**
- * Selfserved AI — First-Party Web Telemetry & Visitor Intelligence Engine
- * Zero external dependencies, ad-blocker immune, privacy-first.
+ * Selfserved AI — First-Party Web Telemetry & Visitor Flow Engine
  * 
- * Features:
- *  1. Traffic Origin & Channel Attribution (Search Engines vs. AI Engines vs. LinkedIn vs. Direct)
- *  2. Full UTM Campaign Parsing (utm_source, utm_medium, utm_campaign, utm_content, utm_term)
- *  3. Active Reading vs. Tab-Switch Idle Measurement (Page Visibility API + 30s interaction debounce)
- *  4. Granular Scroll Depth Milestones (25%, 50%, 75%, 90%)
- *  5. Internal Journey & Outbound Exit Click Tracking
- *  6. Reliable unload beaconing via navigator.sendBeacon
- *  7. Optional automated GA4 loader if window.SF_GA_MEASUREMENT_ID is provided
+ * High-performance, zero-dependency, privacy-first analytics package.
+ * Captures visitor journeys, page flows, clicks, dwell time, and UTM campaigns.
+ * Ad-blocker immune, cookie-less, lightweight (<4KB).
  */
 (function() {
   'use strict';
 
+  // Determine endpoint: relative /api/telemetry on same origin, or fallback to central selfserved.ai
   var ENDPOINT = window.SF_TELEMETRY_ENDPOINT || '/api/telemetry';
   var startTime = Date.now();
   var activeReadSeconds = 0;
   var lastActiveTime = Date.now();
   var isTabActive = !document.hidden;
-  var idleThresholdMs = 30000; // 30 seconds inactivity pauses active reading
+  var idleThresholdMs = 30000; // 30s inactivity pauses active reading counter
   var scrollMilestones = { 25: false, 50: false, 75: false, 90: false };
   var maxScrollReached = 0;
 
-  // Session persistence across pageviews within same browser tab/session
+  // Session ID (persists within the browser tab session)
   var sessionId = (function() {
     try {
       var sid = sessionStorage.getItem('sf_sid');
       if (!sid) {
-        sid = 's_' + Math.random().toString(36).substring(2, 11) + '_' + Date.now().toString(36);
+        sid = 's_' + Math.random().toString(36).substring(2, 10) + '_' + Date.now().toString(36);
         sessionStorage.setItem('sf_sid', sid);
       }
       return sid;
     } catch (e) {
-      return 's_' + Math.random().toString(36).substring(2, 11);
+      return 's_' + Math.random().toString(36).substring(2, 10);
     }
   })();
 
-  // 1. Channel, Referrer, and UTM Parsing
-  function parseReferrerAndCampaign() {
+  // Anonymous Visitor ID (persists across visits on same device without cookies)
+  var visitorId = (function() {
+    try {
+      var vid = localStorage.getItem('sf_vid');
+      var isReturn = true;
+      if (!vid) {
+        isReturn = false;
+        vid = 'v_' + Math.random().toString(36).substring(2, 12) + '_' + Date.now().toString(36);
+        localStorage.setItem('sf_vid', vid);
+      }
+      return { id: vid, is_return: isReturn };
+    } catch (e) {
+      return { id: 'v_anonymous', is_return: false };
+    }
+  })();
+
+  // 1. Channel, Origin, and UTM Attribution Engine
+  function parseOrigin() {
     var ref = document.referrer || '';
     var urlParams = new URLSearchParams(window.location.search);
 
@@ -111,7 +122,7 @@
           channel = 'social';
           sourceName = 'reddit';
         }
-        // Internal Navigation
+        // Internal Ecosystem Navigation
         else if (refHost === window.location.hostname || refHost.indexOf('selfserved.ai') !== -1) {
           channel = 'internal';
           sourceName = refHost;
@@ -128,25 +139,30 @@
     return { referrer: ref, channel: channel, source: sourceName, utm: utm };
   }
 
-  var meta = parseReferrerAndCampaign();
+  var originMeta = parseOrigin();
 
-  function sendEvent(type, extra) {
+  // 2. Dispatch Beacon
+  function sendBeaconEvent(type, extra) {
     var payload = {
       event_type: type,
       timestamp: new Date().toISOString(),
       session_id: sessionId,
+      visitor_id: visitorId.id,
+      is_return_visitor: visitorId.is_return,
       hostname: window.location.hostname,
       pathname: window.location.pathname,
       title: document.title,
-      channel: meta.channel,
-      source: meta.source,
-      referrer: meta.referrer,
-      utm_source: meta.utm.source,
-      utm_medium: meta.utm.medium,
-      utm_campaign: meta.utm.campaign,
-      utm_content: meta.utm.content,
+      channel: originMeta.channel,
+      source: originMeta.source,
+      referrer: originMeta.referrer,
+      utm_source: originMeta.utm.source,
+      utm_medium: originMeta.utm.medium,
+      utm_campaign: originMeta.utm.campaign,
+      utm_content: originMeta.utm.content,
       viewport_w: window.innerWidth,
       viewport_h: window.innerHeight,
+      screen_w: window.screen ? window.screen.width : 0,
+      screen_h: window.screen ? window.screen.height : 0,
       active_read_seconds: Math.round(activeReadSeconds),
       total_dwell_seconds: Math.round((Date.now() - startTime) / 1000),
       max_scroll_reached: maxScrollReached
@@ -162,6 +178,13 @@
       var blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
       if (navigator.sendBeacon) {
         navigator.sendBeacon(ENDPOINT, blob);
+      } else if (window.fetch) {
+        window.fetch(ENDPOINT, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          keepalive: true
+        }).catch(function() {});
       } else {
         var xhr = new XMLHttpRequest();
         xhr.open('POST', ENDPOINT, true);
@@ -169,14 +192,14 @@
         xhr.send(JSON.stringify(payload));
       }
     } catch (e) {
-      // Fail silently to never impact user experience
+      // Fail silently to never impact browsing
     }
   }
 
-  // 2. Initial Pageview Event
-  sendEvent('page_view', {});
+  // 3. Pageview
+  sendBeaconEvent('page_view', {});
 
-  // 3. Active Engagement Timer & Idle Tracking
+  // 4. Activity & Active Reading Measurement
   function recordUserActivity() {
     lastActiveTime = Date.now();
   }
@@ -194,15 +217,15 @@
   document.addEventListener('visibilitychange', function() {
     if (document.hidden) {
       isTabActive = false;
-      sendEvent('engagement_pause', { reason: 'tab_hidden' });
+      sendBeaconEvent('engagement_pause', { reason: 'tab_hidden' });
     } else {
       isTabActive = true;
       lastActiveTime = Date.now();
-      sendEvent('engagement_resume', { reason: 'tab_visible' });
+      sendBeaconEvent('engagement_resume', { reason: 'tab_visible' });
     }
   });
 
-  // 4. Scroll Depth Milestones (25%, 50%, 75%, 90%)
+  // 5. Scroll Depth Milestones
   function checkScroll() {
     var docHeight = Math.max(
       document.body.scrollHeight, document.documentElement.scrollHeight,
@@ -220,57 +243,53 @@
     [25, 50, 75, 90].forEach(function(milestone) {
       if (scrollPercent >= milestone && !scrollMilestones[milestone]) {
         scrollMilestones[milestone] = true;
-        sendEvent('scroll_depth', { milestone_percent: milestone });
+        sendBeaconEvent('scroll_depth', { milestone_percent: milestone });
       }
     });
   }
 
-  var scrollTimer = null;
+  var scrollDebounce = null;
   window.addEventListener('scroll', function() {
-    if (!scrollTimer) {
-      scrollTimer = setTimeout(function() {
+    if (!scrollDebounce) {
+      scrollDebounce = setTimeout(function() {
         checkScroll();
-        scrollTimer = null;
+        scrollDebounce = null;
       }, 200);
     }
   }, { passive: true });
 
-  // 5. Internal Navigation Journey & Outbound Exit Clicks
+  // 6. Navigation Routes, Flow Clicks & CTA Tracking
   document.addEventListener('click', function(e) {
     var link = e.target.closest('a');
-    if (!link || !link.href) return;
+    var button = e.target.closest('button, .btn, [role="button"], [data-cta]');
 
-    var destination = link.href;
-    var linkText = (link.innerText || link.getAttribute('aria-label') || '').trim().substring(0, 80);
-    var isExternal = link.hostname && link.hostname !== window.location.hostname;
+    if (link && link.href) {
+      var dest = link.href;
+      var linkText = (link.innerText || link.getAttribute('aria-label') || link.title || '').trim().substring(0, 80);
+      var isExternal = link.hostname && link.hostname !== window.location.hostname && link.hostname.indexOf('selfserved.ai') === -1;
 
-    sendEvent(isExternal ? 'exit_click' : 'navigation_click', {
-      destination_url: destination,
-      destination_host: link.hostname,
-      link_text: linkText,
-      is_external: isExternal
-    });
+      sendBeaconEvent(isExternal ? 'exit_click' : 'navigation_click', {
+        destination_url: dest,
+        destination_host: link.hostname || '',
+        destination_path: link.pathname || '',
+        link_text: linkText,
+        is_external: isExternal
+      });
+    } else if (button) {
+      var btnText = (button.innerText || button.getAttribute('aria-label') || button.id || '').trim().substring(0, 80);
+      sendBeaconEvent('cta_click', {
+        element_id: button.id || '',
+        element_class: button.className || '',
+        element_text: btnText
+      });
+    }
   });
 
-  // 6. Page Unload / Exit Beacon
+  // 7. Page Exit / Unload Beacon
   window.addEventListener('pagehide', function() {
-    sendEvent('page_exit', {
+    sendBeaconEvent('page_exit', {
       max_scroll_reached: maxScrollReached
     });
   });
 
-  // 7. Optional Parallel Google Analytics 4 Loader
-  if (window.SF_GA_MEASUREMENT_ID && !window.gtag) {
-    var gaId = window.SF_GA_MEASUREMENT_ID;
-    var gaScript = document.createElement('script');
-    gaScript.async = true;
-    gaScript.src = 'https://www.googletagmanager.com/gtag/js?id=' + gaId;
-    document.head.appendChild(gaScript);
-
-    window.dataLayer = window.dataLayer || [];
-    function gtag(){ window.dataLayer.push(arguments); }
-    window.gtag = gtag;
-    gtag('js', new Date());
-    gtag('config', gaId);
-  }
 })();
